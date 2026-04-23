@@ -1,0 +1,76 @@
+CS450 – Assignment 6: Symbolic Links
+
+1. Overview
+
+This assignment extends the xv6 operating system with symbolic link support. Symbolic links (symlinks) are a type of file that stores a path to another file. When the OS opens a symlink, it transparently follows the stored path to reach the actual target. The implementation required adding a new inode type, a new system call, and modifying path resolution logic to follow links while preventing infinite loops.
+
+2. Files Modified
+
+•	stat.h – Added T_SYMLINK inode type constant
+•	syscall.h – Added SYS_symlink syscall number
+•	syscall.c – Registered sys_symlink in the syscall dispatch table
+•	sysfile.c – Implemented sys_symlink() and modified sys_open() to follow symlinks
+•	user.h – Declared symlink() for userspace programs
+•	usys.S – Added SYSCALL(symlink) stub for the user-kernel interface
+•	Makefile – Added _testsymlink to UPROGS and fs.img targets
+
+3. Implementation Details
+
+3.1 New Inode Type (stat.h)
+
+A new file type constant T_SYMLINK was added to stat.h to distinguish symlink inodes from regular files, directories, and devices:
+#define T_SYMLINK 4
+Symlink inodes store their target path string in their data blocks, just like a regular file stores data. No structural changes to the on-disk inode format were needed.
+
+3.2 New Syscall: symlink() (syscall.h, syscall.c, sysfile.c)
+
+The syscall number was assigned in syscall.h:
+#define SYS_symlink 22
+In syscall.c, the extern declaration and dispatch table entry were added alongside the existing syscalls. The kernel-side implementation in sysfile.c creates a new inode of type T_SYMLINK at the given linkpath and writes the target string into the inode's data blocks using writei():
+int sys_symlink(void) {
+  char *target, *path;
+  struct inode *ip;
+  if(argstr(0, &target) < 0 || argstr(1, &path) < 0)
+    return -1;
+  begin_op();
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0) { end_op(); return -1; }
+  if(writei(ip, target, 0, strlen(target)) != strlen(target)) {
+    iunlockput(ip); end_op(); return -1;
+  }
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+3.3 Symlink Resolution in sys_open() (sysfile.c)
+
+The sys_open() function was modified to detect and follow symlinks when opening a path. After resolving the initial inode, a while loop checks if the inode type is T_SYMLINK. If so, the target path is read from the inode's data blocks, the inode is released, and namei() is called again on the target path. This supports chained symlinks transparently.
+A depth counter enforces a maximum of 10 hops. If the limit is exceeded, open() returns -1, which handles circular symlink chains (e.g., a -> b -> a):
+int depth = 0;
+while(ip->type == T_SYMLINK) {
+  if(depth++ >= 10) { iunlockput(ip); end_op(); return -1; }
+  char target[128];
+  int n = readi(ip, target, 0, sizeof(target)-1);
+  iunlockput(ip);
+  if(n <= 0) { end_op(); return -1; }
+  target[n] = 0;
+  if((ip = namei(target)) == 0) { end_op(); return -1; }
+  ilock(ip);
+}
+
+4. Test Results
+
+The provided testsymlink.c test program was compiled and run inside xv6. All three test cases passed:
+
+•	PASS: symlink created – The symlink() syscall successfully created a T_SYMLINK inode at the given path with the target stored in its data blocks.
+•	PASS: read through symlink – Opening a symlink via open() correctly followed the link and returned the target file's contents.
+•	PASS: loop detected (open failed) – A circular chain (a -> b -> a) caused open() to fail after exceeding the depth limit of 10, returning -1 as expected.
+
+Final output:
+
+$ testsymlink
+PASS: symlink created
+PASS: read through symlink
+PASS: loop detected (open failed)
+testsymlink done
